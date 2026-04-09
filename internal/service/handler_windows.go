@@ -1,10 +1,11 @@
-// +build windows
+//go:build windows
 
 package service
 
 import (
 	"fmt"
-	log "github.com/sirupsen/logrus"
+	"log/slog"
+
 	"golang.org/x/sys/windows/svc"
 )
 
@@ -27,7 +28,7 @@ loop:
 				s.stopCh <- true
 				break loop
 			default:
-				log.Error(fmt.Sprintf("unexpected control request #%d", c))
+				slog.Error("Unexpected service control request", "cmd", fmt.Sprintf("#%d", c))
 			}
 		}
 	}
@@ -35,8 +36,8 @@ loop:
 	return
 }
 
-// SetupServiceListener setups service handler for windows
-func SetupServiceListener(stopCh chan<- bool, serviceName string, logger log.StdLogger) error {
+// SetupServiceListener sets up a Windows service handler or signal handler for interactive sessions.
+func SetupServiceListener(stopCh chan<- bool, serviceName string) error {
 	isInteractive, err := svc.IsAnInteractiveSession()
 	if err != nil {
 		return err
@@ -44,9 +45,8 @@ func SetupServiceListener(stopCh chan<- bool, serviceName string, logger log.Std
 
 	if !isInteractive {
 		go func() {
-			err = svc.Run(serviceName, &beatExporterService{stopCh: stopCh})
-			if err != nil {
-				logger.Printf("Failed to start service: %v", err)
+			if err := svc.Run(serviceName, &beatExporterService{stopCh: stopCh}); err != nil {
+				slog.Error("Failed to start Windows service", "err", err)
 			}
 		}()
 	}

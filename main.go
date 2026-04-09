@@ -2,225 +2,240 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
-	"net"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
-	log "github.com/sirupsen/logrus"
+	prometheusexporter "go.opentelemetry.io/otel/exporters/prometheus"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 
-	"github.com/prometheus/client_golang/prometheus"
+	promclient "github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/prometheus/common/version"
-	"github.com/trustpilot/beat-exporter/collector"
-	"github.com/trustpilot/beat-exporter/internal/service"
+
+	"github.com/AstralJaeger/beat-exporter/collector"
+	"github.com/AstralJaeger/beat-exporter/internal/service"
+	"github.com/AstralJaeger/beat-exporter/internal/version"
 )
 
-const (
-	serviceName = "beat_exporter"
-)
+const serviceName = "beat_exporter"
 
 func main() {
 	var (
-		Name          = serviceName
-		listenAddress = flag.String("web.listen-address", ":9479", "Address to listen on for web interface and telemetry.")
-		tlsCertFile   = flag.String("tls.certfile", "", "TLS certs file if you want to use tls instead of http")
-		tlsKeyFile    = flag.String("tls.keyfile", "", "TLS key file if you want to use tls instead of http")
-		metricsPath   = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
-		beatURI       = flag.String("beat.uri", "http://localhost:5066", "HTTP API address of beat.")
-		beatTimeout   = flag.Duration("beat.timeout", 10*time.Second, "Timeout for trying to get stats from beat.")
-		showVersion   = flag.Bool("version", false, "Show version and exit")
-		systemBeat    = flag.Bool("beat.system", false, "Expose system stats")
+		listenAddress  = flag.String("web.listen-address", ":9479", "Address to listen on for web interface and telemetry.")
+		tlsCertFile    = flag.String("tls.certfile", "", "TLS certificate file (enables HTTPS).")
+		tlsKeyFile     = flag.String("tls.keyfile", "", "TLS key file (enables HTTPS).")
+		metricsPath    = flag.String("web.telemetry-path", "/metrics", "Path under which to expose Prometheus metrics.")
+		beatURI        = flag.String("beat.uri", "http://localhost:5066", "HTTP API address of the beat.")
+		beatTimeout    = flag.Duration("beat.timeout", 10*time.Second, "Timeout for requests to the beat stats endpoint.")
+		showVersion    = flag.Bool("version", false, "Print version information and exit.")
+		systemBeat     = flag.Bool("beat.system", false, "Expose system-level stats (load, CPU cores).")
+		exporterType   = flag.String("exporter.type", envOrDefault("BEAT_EXPORTER_TYPE", "prometheus"),
+			"Exporter backend: 'prometheus' (pull) or 'otlp' (push). Overridden by BEAT_EXPORTER_TYPE env var.")
 	)
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Print(version.Print(Name))
+		fmt.Print(version.Print(serviceName))
 		os.Exit(0)
 	}
 
-	log.SetLevel(log.DebugLevel)
+	setupLogging()
 
-	log.SetFormatter(&log.JSONFormatter{
-		FieldMap: log.FieldMap{
-			log.FieldKeyMsg: "message",
-		},
-	})
-
-	beatURL, err := url.Parse(*beatURI)
-
-	if err != nil {
-		log.Fatalf("failed to parse beat.uri, error: %v", err)
-	}
-
-	httpClient := &http.Client{
-		Timeout: *beatTimeout,
-	}
-
-	if beatURL.Scheme == "unix" {
-		unixPath := beatURL.Path
-		beatURL.Scheme = "http"
-		beatURL.Host = "localhost"
-		beatURL.Path = ""
-		httpClient.Transport = &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, "unix", unixPath)
-			},
-		}
-	}
-
-	log.Info("Exploring target for beat type")
-
-	var beatInfo *collector.BeatInfo
-
-	stopCh := make(chan bool)
-
-	err = service.SetupServiceListener(stopCh, serviceName, log.StandardLogger())
-	if err != nil {
-		log.WithFields(log.Fields{
-			"err": err,
-		}).Errorf("could not setup service listener: %v", err)
-	}
-
-	t := time.NewTicker(1 * time.Second)
-
-beatdiscovery:
-	for {
-		select {
-		case <-t.C:
-			beatInfo, err = loadBeatType(httpClient, *beatURL)
-			if err != nil {
-				log.Errorf("Could not load beat type, with error: %v, retrying in 1s", err)
-				continue
-			}
-
-			break beatdiscovery
-
-		case <-stopCh:
-			os.Exit(0) // signal received, stop gracefully
-		}
-	}
-
-	t.Stop()
-
-	// version metric
-	registry := prometheus.NewRegistry()
-	versionMetric := version.NewCollector(Name)
-	mainCollector := collector.NewMainCollector(httpClient, beatURL, Name, beatInfo, *systemBeat)
-	registry.MustRegister(versionMetric)
-	registry.MustRegister(mainCollector)
-
-	http.Handle(*metricsPath, promhttp.HandlerFor(
-		registry,
-		promhttp.HandlerOpts{
-			ErrorLog:           log.New(),
-			DisableCompression: false,
-			ErrorHandling:      promhttp.ContinueOnError}),
+	slog.Info("Starting beat-exporter",
+		"version", version.Version,
+		"revision", version.Revision,
+		"branch", version.Branch,
+		"buildDate", version.BuildDate,
+		"exporterType", *exporterType,
 	)
 
-	http.HandleFunc("/", IndexHandler(*metricsPath))
+	beatURL, err := url.Parse(*beatURI)
+	if err != nil {
+		slog.Error("Invalid beat.uri", "err", err)
+		os.Exit(1)
+	}
 
-	log.WithFields(log.Fields{
-		"addr": *listenAddress,
-	}).Infof("Starting exporter with configured type: %s", beatInfo.Beat)
+	httpClient := &http.Client{Timeout: *beatTimeout}
 
-	go func() {
-		defer func() {
-			stopCh <- true
-		}()
+	if beatURL.Scheme == "unix" {
+		httpClient, beatURL = collector.NewHTTPClientWithUnixSocket(beatURL, *beatTimeout)
+	}
 
-		log.Info("Starting listener")
-		if *tlsCertFile != "" && *tlsKeyFile != "" {
-			if err := http.ListenAndServeTLS(*listenAddress, *tlsCertFile, *tlsKeyFile, nil); err != nil {
+	stopCh := make(chan bool, 1)
 
-				log.WithFields(log.Fields{
-					"err": err,
-				}).Errorf("tls server quit with error: %v", err)
+	if err := service.SetupServiceListener(stopCh, serviceName); err != nil {
+		slog.Warn("Could not set up service listener", "err", err)
+	}
 
-			}
-		} else {
-			if err := http.ListenAndServe(*listenAddress, nil); err != nil {
+	slog.Info("Discovering beat type", "url", beatURL.String())
+	beatInfo := discoverBeat(httpClient, *beatURL, stopCh)
 
-				log.WithFields(log.Fields{
-					"err": err,
-				}).Errorf("http server quit with error: %v", err)
+	// Build OTel MeterProvider
+	ctx := context.Background()
+	res := resource.NewWithAttributes(
+		semconv.SchemaURL,
+		semconv.ServiceName(serviceName),
+		semconv.ServiceVersion(version.Version),
+	)
 
-			}
+	var mp *metric.MeterProvider
+	var mux *http.ServeMux
+
+	switch strings.ToLower(*exporterType) {
+	case "otlp":
+		mp, err = buildOTLPProvider(ctx, res)
+		if err != nil {
+			slog.Error("Failed to create OTLP MeterProvider", "err", err)
+			os.Exit(1)
 		}
-		log.Info("Listener exited")
+		slog.Info("OTLP metrics push enabled", "endpoint", os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+
+	default: // "prometheus"
+		registry := promclient.NewRegistry()
+		mp, err = buildPrometheusProvider(registry, res)
+		if err != nil {
+			slog.Error("Failed to create Prometheus MeterProvider", "err", err)
+			os.Exit(1)
+		}
+		mux = http.NewServeMux()
+		mux.Handle(*metricsPath, promhttp.HandlerFor(registry, promhttp.HandlerOpts{
+			ErrorLog:      slog.NewLogLogger(slog.Default().Handler(), slog.LevelError),
+			ErrorHandling: promhttp.ContinueOnError,
+		}))
+		mux.HandleFunc("/", indexHandler(*metricsPath))
+		slog.Info("Prometheus metrics endpoint enabled", "path", *metricsPath)
+	}
+
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := mp.Shutdown(shutdownCtx); err != nil {
+			slog.Error("Error shutting down MeterProvider", "err", err)
+		}
 	}()
 
+	meter := mp.Meter(serviceName)
+
+	if _, err := collector.NewBeatCollector(meter, httpClient, beatURL, beatInfo, *systemBeat); err != nil {
+		slog.Error("Failed to register beat collector", "err", err)
+		os.Exit(1)
+	}
+
+	slog.Info("Exporter started", "beat", beatInfo.Beat, "listenAddress", *listenAddress)
+
+	go func() {
+		var serverErr error
+		if *tlsCertFile != "" && *tlsKeyFile != "" {
+			serverErr = http.ListenAndServeTLS(*listenAddress, *tlsCertFile, *tlsKeyFile, mux)
+		} else {
+			serverErr = http.ListenAndServe(*listenAddress, mux)
+		}
+		if serverErr != nil && !errors.Is(serverErr, http.ErrServerClosed) {
+			slog.Error("HTTP server error", "err", serverErr)
+		}
+		stopCh <- true
+	}()
+
+	<-stopCh
+	slog.Info("Shutting down beat-exporter")
+}
+
+// discoverBeat polls the beat endpoint until it responds, then returns the BeatInfo.
+// It exits if a stop signal arrives first.
+func discoverBeat(client *http.Client, beatURL url.URL, stopCh chan bool) *collector.BeatInfo {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
 	for {
-		if <-stopCh {
-			log.Info("Shutting down beats exporter")
-			break
+		select {
+		case <-ticker.C:
+			info, err := collector.LoadBeatInfo(client, beatURL)
+			if err != nil {
+				slog.Warn("Beat not yet reachable, retrying in 1s", "err", err)
+				continue
+			}
+			return info
+		case <-stopCh:
+			slog.Info("Stop signal received during beat discovery")
+			os.Exit(0)
 		}
 	}
 }
 
-// IndexHandler returns a http handler with the correct metricsPath
-func IndexHandler(metricsPath string) http.HandlerFunc {
+func buildPrometheusProvider(registry *promclient.Registry, res *resource.Resource) (*metric.MeterProvider, error) {
+	exporter, err := prometheusexporter.New(
+		prometheusexporter.WithRegisterer(registry),
+		prometheusexporter.WithoutScopeInfo(),
+		prometheusexporter.WithoutTargetInfo(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return metric.NewMeterProvider(
+		metric.WithReader(exporter),
+		metric.WithResource(res),
+	), nil
+}
 
-	indexHTML := `
+func buildOTLPProvider(ctx context.Context, res *resource.Resource) (*metric.MeterProvider, error) {
+	exporter, err := otlpmetricgrpc.New(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return metric.NewMeterProvider(
+		metric.WithReader(metric.NewPeriodicReader(exporter,
+			metric.WithInterval(envDurationOrDefault("OTEL_METRIC_EXPORT_INTERVAL", 60*time.Second)),
+		)),
+		metric.WithResource(res),
+	), nil
+}
+
+// indexHandler returns a simple HTML landing page for the Prometheus mode.
+func indexHandler(metricsPath string) http.HandlerFunc {
+	body := fmt.Sprintf(strings.TrimSpace(`
 <html>
-	<head>
-		<title>Beat Exporter</title>
-	</head>
-	<body>
-		<h1>Beat Exporter</h1>
-		<p>
-			<a href='%s'>Metrics</a>
-		</p>
-	</body>
-</html>
-`
-	index := []byte(fmt.Sprintf(strings.TrimSpace(indexHTML), metricsPath))
-
+<head><title>Beat Exporter</title></head>
+<body>
+<h1>Beat Exporter</h1>
+<p><a href='%s'>Metrics</a></p>
+</body>
+</html>`), metricsPath)
+	b := []byte(body)
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Write(index)
+		_, _ = w.Write(b)
 	}
 }
 
-func loadBeatType(client *http.Client, url url.URL) (*collector.BeatInfo, error) {
-	beatInfo := &collector.BeatInfo{}
-
-	response, err := client.Get(url.String())
-	if err != nil {
-		return beatInfo, err
+func setupLogging() {
+	level := slog.LevelInfo
+	if strings.ToLower(os.Getenv("LOG_LEVEL")) == "debug" {
+		level = slog.LevelDebug
 	}
-	defer response.Body.Close()
-
-	if response.StatusCode != http.StatusOK {
-		log.Errorf("Beat URL: %q status code: %d", url.String(), response.StatusCode)
-		return beatInfo, err
-	}
-
-	bodyBytes, err := ioutil.ReadAll(response.Body)
-	if err != nil {
-		log.Error("Can't read body of response")
-		return beatInfo, err
-	}
-
-	err = json.Unmarshal(bodyBytes, &beatInfo)
-	if err != nil {
-		log.Error("Could not parse JSON response for target")
-		return beatInfo, err
-	}
-
-	log.WithFields(
-		log.Fields{
-			"beat":     beatInfo.Beat,
-			"version":  beatInfo.Version,
-			"name":     beatInfo.Name,
-			"hostname": beatInfo.Hostname,
-			"uuid":     beatInfo.UUID,
-		}).Info("Target beat configuration loaded successfully!")
-
-	return beatInfo, nil
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
 }
+
+func envOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func envDurationOrDefault(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
+}
+
