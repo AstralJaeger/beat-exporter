@@ -466,7 +466,6 @@ func NewBeatCollector(
 	}
 
 	// ---- metricbeat-specific ----
-	type mbGaugePair struct{ success, failures metric.Float64ObservableCounter }
 	var (
 		mbCPU, mbFilesystem, mbFsstat, mbLoad, mbMemory metric.Float64ObservableCounter
 		mbNetwork, mbProcess, mbProcessSummary, mbUptime metric.Float64ObservableCounter
