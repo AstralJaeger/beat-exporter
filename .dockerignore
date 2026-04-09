@@ -1,0 +1,26 @@
+# Build artifacts
+.build/
+.release/
+
+# Development tools
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Go test/coverage artifacts
+*.test
+coverage.out
+coverage.html
+
+# Local binaries
+beat-exporter
+beat-exporter.exe

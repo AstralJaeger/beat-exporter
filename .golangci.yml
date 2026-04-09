@@ -1,0 +1,37 @@
+# golangci-lint configuration
+# https://golangci-lint.run/usage/configuration/
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - gosec
+    - revive
+    - gofmt
+    - gocritic
+    - misspell
+    - unconvert
+    - unparam
+
+linters-settings:
+  revive:
+    rules:
+      - name: exported
+        severity: warning
+
+  govet:
+    enable-all: true
+
+  gosec:
+    excludes:
+      - G104 # Unhandled errors (we handle them where necessary)
+
+issues:
+  exclude-rules:
+    - path: "_test.go"
+      linters:
+        - gosec
+        - errcheck
