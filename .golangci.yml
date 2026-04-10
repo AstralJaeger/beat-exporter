@@ -27,8 +27,6 @@ linters:
     gosec:
       excludes:
         - G104 # Unhandled errors (intentional in selected places)
-
-issues:
   exclusions:
     rules:
       - path: _test\.go
