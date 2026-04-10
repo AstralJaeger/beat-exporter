@@ -15,23 +15,23 @@ linters:
     - misspell
     - unconvert
     - unparam
+  settings:
+    revive:
+      rules:
+        - name: exported
+          severity: warning
 
-linters-settings:
-  revive:
-    rules:
-      - name: exported
-        severity: warning
+    govet:
+      enable-all: true
 
-  govet:
-    enable-all: true
-
-  gosec:
-    excludes:
-      - G104 # Unhandled errors (we handle them where necessary)
+    gosec:
+      excludes:
+        - G104 # Unhandled errors (intentional in selected places)
 
 issues:
-  exclude-rules:
-    - path: "_test.go"
-      linters:
-        - gosec
-        - errcheck
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
