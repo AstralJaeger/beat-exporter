@@ -1,23 +1,22 @@
-// +build linux darwin
+//go:build linux || darwin
 
 package service
 
 import (
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
-
-	log "github.com/sirupsen/logrus"
 )
 
-// SetupServiceListener setups singal handler
-func SetupServiceListener(stopCh chan<- bool, serviceName string, logger log.StdLogger) error {
+// SetupServiceListener sets up a signal handler that sends to stopCh on SIGINT/SIGTERM/SIGHUP.
+func SetupServiceListener(stopCh chan<- bool, serviceName string) error {
 	go func() {
 		sigs := make(chan os.Signal, 1)
-		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL, syscall.SIGHUP)
-		logger.Printf("Signal received: %v", <-sigs)
+		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+		sig := <-sigs
+		slog.Info("Signal received, shutting down", "signal", sig, "service", serviceName)
 		stopCh <- true
-		close(stopCh)
 	}()
 
 	return nil

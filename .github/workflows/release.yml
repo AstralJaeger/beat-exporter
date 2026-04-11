@@ -1,0 +1,234 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  # -------------------------------------------------------------------------
+  validate-tag:
+  # -------------------------------------------------------------------------
+    name: Validate tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check semver tag format
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if ! echo "${TAG}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "ERROR: tag '${TAG}' is not a valid semver tag (must match v<major>.<minor>.<patch>)"
+            exit 1
+          fi
+          echo "Tag '${TAG}' is valid."
+
+  # -------------------------------------------------------------------------
+  test:
+  # -------------------------------------------------------------------------
+    name: Test
+    runs-on: ubuntu-latest
+    needs: [validate-tag]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Download modules
+        run: go mod download
+
+      - name: Run unit tests
+        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Upload coverage
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: test-coverage
+          path: coverage.out
+
+  # -------------------------------------------------------------------------
+  build-artifacts:
+  # -------------------------------------------------------------------------
+    name: Build artifacts
+    runs-on: ubuntu-latest
+    needs: [test]
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            archive: tar
+          - goos: linux
+            goarch: arm64
+            archive: tar
+          - goos: darwin
+            goarch: amd64
+            archive: tar
+          - goos: darwin
+            goarch: arm64
+            archive: tar
+          - goos: windows
+            goarch: amd64
+            archive: zip
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          REVISION="$(git rev-parse --short HEAD)"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          SUFFIX=""
+          [ "${{ matrix.goos }}" = "windows" ] && SUFFIX=".exe"
+
+          mkdir -p .build
+          go build \
+            -ldflags "-s -w \
+              -X github.com/AstralJaeger/beat-exporter/internal/version.Version=${VERSION} \
+              -X github.com/AstralJaeger/beat-exporter/internal/version.Revision=${REVISION} \
+              -X github.com/AstralJaeger/beat-exporter/internal/version.Branch=${GITHUB_REF_NAME} \
+              -X github.com/AstralJaeger/beat-exporter/internal/version.BuildDate=${BUILD_DATE} \
+              -X github.com/AstralJaeger/beat-exporter/internal/version.BuildUser=github-actions" \
+            -tags 'netgo static_build' -a \
+            -o ".build/beat-exporter${SUFFIX}" .
+
+      - name: Create archive
+        id: archive
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          NAME="beat-exporter-${VERSION}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          ARCHIVE_DIR=".release"
+          mkdir -p "${ARCHIVE_DIR}"
+
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            ARCHIVE_FILE="${ARCHIVE_DIR}/${NAME}.zip"
+            zip -j "${ARCHIVE_FILE}" .build/beat-exporter.exe LICENSE
+          else
+            ARCHIVE_FILE="${ARCHIVE_DIR}/${NAME}.tar.gz"
+            cp LICENSE .build/LICENSE
+            tar -czf "${ARCHIVE_FILE}" -C .build beat-exporter LICENSE
+          fi
+
+          echo "archive_file=${ARCHIVE_FILE}" >> "${GITHUB_OUTPUT}"
+          echo "archive_name=$(basename ${ARCHIVE_FILE})" >> "${GITHUB_OUTPUT}"
+
+      - name: Compute checksum
+        run: |
+          cd .release
+          sha256sum "$(basename ${{ steps.archive.outputs.archive_file }})" >> sha256sums.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            ${{ steps.archive.outputs.archive_file }}
+            .release/sha256sums.txt
+
+  # -------------------------------------------------------------------------
+  docker-publish:
+  # -------------------------------------------------------------------------
+    name: Publish Docker image
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/beat-exporter
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            REVISION=${{ github.sha }}
+            BRANCH=${{ github.ref_name }}
+            BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # -------------------------------------------------------------------------
+  github-release:
+  # -------------------------------------------------------------------------
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-artifacts, docker-publish]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Download all release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: .release
+
+      - name: Merge checksum files
+        run: |
+          cd .release
+          cat sha256sums.txt* 2>/dev/null | sort -u > sha256sums-all.txt || true
+          if [ -f sha256sums-all.txt ] && [ -s sha256sums-all.txt ]; then
+            mv sha256sums-all.txt sha256sums.txt
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        with:
+          generate_release_notes: true
+          files: |
+            .release/*.tar.gz
+            .release/*.zip
+            .release/sha256sums.txt
