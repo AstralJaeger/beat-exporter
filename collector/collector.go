@@ -24,11 +24,11 @@ var hackfixRegex = regexp.MustCompile(`"time":(\d+)`)
 // BeatCollector fetches stats from a beat's HTTP endpoint and exposes them as
 // OpenTelemetry observable instruments.
 type BeatCollector struct {
+	client     *http.Client
+	beatURL    *url.URL
 	mu         sync.RWMutex
 	stats      Stats
 	beatInfo   BeatInfo
-	client     *http.Client
-	beatURL    *url.URL
 	systemBeat bool
 	up         bool
 }
@@ -282,9 +282,9 @@ func NewBeatCollector(
 
 	// ---- system (optional) ----
 	var (
-		sysCPUCores                                             metric.Float64ObservableCounter
-		sysLoad1, sysLoad5, sysLoad15                          metric.Float64ObservableGauge
-		sysLoadNorm1, sysLoadNorm5, sysLoadNorm15              metric.Float64ObservableGauge
+		sysCPUCores                               metric.Float64ObservableCounter
+		sysLoad1, sysLoad5, sysLoad15             metric.Float64ObservableGauge
+		sysLoadNorm1, sysLoadNorm5, sysLoadNorm15 metric.Float64ObservableGauge
 	)
 	if systemBeat {
 		sysCPUCores, err = meter.Float64ObservableCounter(beat+"_system_cpu_cores",
@@ -359,12 +359,12 @@ func NewBeatCollector(
 
 	// ---- filebeat-specific ----
 	var (
-		fbEventsActive, fbEventsAdded, fbEventsDone               metric.Float64ObservableGauge
-		fbHarvClosed, fbHarvOpenFiles, fbHarvRunning               metric.Float64ObservableGauge
-		fbHarvSkipped, fbHarvStarted                               metric.Float64ObservableGauge
-		fbInputLogRenamed, fbInputLogTruncated                     metric.Float64ObservableGauge
-		regWritesFail, regWritesSuccess, regWritesTotal            metric.Float64ObservableGauge
-		regStatesCleanup, regStatesCurrent, regStatesUpdate        metric.Float64ObservableGauge
+		fbEventsActive, fbEventsAdded, fbEventsDone         metric.Float64ObservableGauge
+		fbHarvClosed, fbHarvOpenFiles, fbHarvRunning        metric.Float64ObservableGauge
+		fbHarvSkipped, fbHarvStarted                        metric.Float64ObservableGauge
+		fbInputLogRenamed, fbInputLogTruncated              metric.Float64ObservableGauge
+		regWritesFail, regWritesSuccess, regWritesTotal     metric.Float64ObservableGauge
+		regStatesCleanup, regStatesCurrent, regStatesUpdate metric.Float64ObservableGauge
 	)
 	if beat == "filebeat" {
 		fbEventsActive, err = meter.Float64ObservableGauge(beat+"_filebeat_events_active",
@@ -467,7 +467,7 @@ func NewBeatCollector(
 
 	// ---- metricbeat-specific ----
 	var (
-		mbCPU, mbFilesystem, mbFsstat, mbLoad, mbMemory metric.Float64ObservableCounter
+		mbCPU, mbFilesystem, mbFsstat, mbLoad, mbMemory  metric.Float64ObservableCounter
 		mbNetwork, mbProcess, mbProcessSummary, mbUptime metric.Float64ObservableCounter
 	)
 	if beat == "metricbeat" {
@@ -562,7 +562,7 @@ func NewBeatCollector(
 	_, err = meter.RegisterCallback(func(_ context.Context, obs metric.Observer) error {
 		if fetchErr := bc.fetchStats(); fetchErr != nil {
 			obs.ObserveFloat64(upGauge, 0)
-			slog.Error("Failed to fetch beat stats", "err", fetchErr, "url", beatURL.String())
+			slog.Error("Failed to fetch beat stats", "err", fetchErr)
 			return nil
 		}
 
@@ -685,7 +685,11 @@ func LoadBeatInfo(client *http.Client, beatURL url.URL) (*BeatInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Warn("Failed to close beat info response body", "err", closeErr)
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("beat returned HTTP %d from %s", resp.StatusCode, beatURL.String())
@@ -717,7 +721,11 @@ func (bc *BeatCollector) fetchStats() error {
 	if err != nil {
 		return fmt.Errorf("fetching /stats: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			slog.Warn("Failed to close /stats response body", "err", closeErr)
+		}
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

@@ -103,6 +103,8 @@ OTEL_METRIC_EXPORT_INTERVAL=60s   # default: 60s
 OTEL_SERVICE_NAME=beat-exporter   # default: beat_exporter
 ```
 
+In OTLP mode, the exporter does **not** start the Prometheus HTTP listener.
+
 ---
 
 ## Configuration Reference
@@ -125,7 +127,7 @@ OTEL_SERVICE_NAME=beat-exporter   # default: beat_exporter
 
 | Variable | Description |
 |----------|-------------|
-| `BEAT_EXPORTER_TYPE` | Override `--exporter.type` (`prometheus` or `otlp`) |
+| `BEAT_EXPORTER_TYPE` | Default value for `--exporter.type` (`prometheus` or `otlp`); explicit CLI flag overrides it |
 | `LOG_LEVEL` | Set log level (`debug` or `info`, default: `info`) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP endpoint (used with `BEAT_EXPORTER_TYPE=otlp`) |
 | `OTEL_EXPORTER_OTLP_HEADERS` | OTLP headers (e.g., auth tokens) |

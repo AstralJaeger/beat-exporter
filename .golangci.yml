@@ -10,7 +10,6 @@ linters:
     - staticcheck
     - gosec
     - revive
-    - gofmt
     - gocritic
     - misspell
     - unconvert
@@ -23,6 +22,8 @@ linters:
 
     govet:
       enable-all: true
+      disable:
+        - fieldalignment
 
     gosec:
       excludes:
@@ -33,3 +34,7 @@ linters:
         linters:
           - gosec
           - errcheck
+
+formatters:
+  enable:
+    - gofmt
